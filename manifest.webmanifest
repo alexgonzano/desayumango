@@ -1,0 +1,18 @@
+{
+  "id": "./",
+  "name": "Ronda de cafés",
+  "short_name": "Cafés",
+  "description": "Uno paga los cafés y la app lleva las cuentas.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ECEEF2",
+  "theme_color": "#2443C4",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
