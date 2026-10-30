@@ -7,8 +7,8 @@
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" type="image/png" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png?v=3">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png?v=3">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="DesayuMango">
 <style>
@@ -324,6 +324,23 @@ h2 .link { min-height: 0; padding: 0; font-size: 15px; text-transform: none; }
 .welcome .note { margin: 12px auto 0; }
 .gsi { display: flex; justify-content: center; min-height: 44px; margin: 8px 0 4px; }
 
+/* Pantalla de entrar */
+body.is-login .top { display: none; }
+.login { max-width: 420px; margin: 0 auto; padding-top: 40px; text-align: center; }
+.login .app-icon { width: 96px; height: 96px; border-radius: 22px; margin-bottom: 22px; }
+.login h2.login-title {
+  display: block; margin: 0; padding: 0; color: var(--ink); text-transform: none;
+  font-size: 40px; line-height: 1.1; font-weight: 700; letter-spacing: -0.035em;
+}
+.login-lead { margin: 10px auto 32px; max-width: 30ch; font-size: 17px; color: var(--muted); text-wrap: balance; }
+.features { list-style: none; margin: 0 auto 36px; padding: 0; display: grid; gap: 20px; text-align: left; }
+.features li { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.features svg { width: 30px; height: 30px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.features b { display: block; font-size: 16px; font-weight: 600; letter-spacing: -0.015em; }
+.features span { display: block; font-size: 15px; line-height: 1.35; color: var(--muted); }
+.login .gsi { min-height: 48px; }
+.login .note { margin: 12px auto 0; text-align: center; }
+
 /* Aviso de solicitudes */
 .notice {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 24px;
@@ -619,22 +636,21 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
 
   function loginError(msg) { var e = new Error(msg); e.code = 'login'; return e; }
 
-  // Versión GitHub: la web llama al Apps Script con el token de Google de quien ha entrado.
+  // Versión GitHub: la web llama al Apps Script con la sesión de la app (30 días, se renueva sola).
   function apiStore(cfg) {
-    var auth = googleAuth(cfg.googleClientId);
-    function call(action, args) {
-      var tok = auth.current();
-      if (!tok) { state.needLogin = true; return Promise.reject(loginError('Entra con tu cuenta de Google')); }
+    var auth = appAuth(cfg.googleClientId);
+    function post(body) {
       return fetch(cfg.apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // así el navegador no hace consulta previa (CORS)
-        body: JSON.stringify({ action: action, args: args, token: tok })
+        body: JSON.stringify(body)
       }).catch(function () {
         throw new Error('No hay conexión con el servidor. Si estás en la wifi de la empresa, prueba con datos del móvil');
       }).then(function (r) {
         if (!r.ok) throw new Error('El servidor ha respondido con un error (' + r.status + ')');
         return r.json();
       }).then(function (res) {
+        if (res && res.session) auth.saveSession(res.session); // sesión nueva o renovada
         if (res && res.ok) return res.data;
         var err = new Error((res && res.error) || 'Error del servidor');
         err.code = res && res.code;
@@ -642,6 +658,23 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
         throw err;
       });
     }
+    function call(action, args) {
+      var cred = auth.credentials();
+      if (!cred) { state.needLogin = true; return Promise.reject(loginError('Entra con tu cuenta de Google')); }
+      var body = { action: action, args: args };
+      if (cred.session) body.session = cred.session; else body.token = cred.token;
+      return post(body);
+    }
+    // Al pulsar el botón de Google: se cambia su token (1 hora) por una sesión de la app (30 días).
+    auth.setExchange(function (googleToken) {
+      return post({ action: 'iniciarSesion', args: [], token: googleToken }).catch(function (err) {
+        if (/Acción desconocida/.test(err.message)) { // servidor aún sin actualizar: funciona, pero solo una hora
+          auth.saveLegacy(googleToken);
+          return call('cargarDatos', []);
+        }
+        throw err;
+      });
+    });
     function action(name) { return function () { return call(name, Array.prototype.slice.call(arguments)); }; }
     return {
       demo: false, api: true, auth: auth,
@@ -655,24 +688,31 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     };
   }
 
-  // Inicio de sesión con Google (Google Identity Services). El token dura una hora.
-  function googleAuth(clientId) {
+  // Inicio de sesión con Google (Google Identity Services) y la sesión que da el servidor a cambio.
+  function appAuth(clientId) {
     var KEY = 'ronda-cafes-sesion';
-    var token = null, listeners = [], ready = null;
+    var saved = null, listeners = [], errorFn = null, exchange = null, ready = null;
     function claims(t) {
       try {
-        var b = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        var b = String(t).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
         while (b.length % 4) b += '=';
         var bytes = Uint8Array.from(atob(b), function (c) { return c.charCodeAt(0); });
         return JSON.parse(new TextDecoder().decode(bytes));
       } catch (e) { return null; }
     }
-    function valid(t) { var c = t && claims(t); return !!(c && c.exp * 1000 > Date.now() + 60000); }
-    try { var saved = JSON.parse(localStorage.getItem(KEY) || 'null'); if (saved && valid(saved.t)) token = saved.t; } catch (e) { /* sin almacenamiento */ }
-    function set(t) {
-      token = t;
-      try { localStorage.setItem(KEY, JSON.stringify({ t: t })); } catch (e) { /* sin almacenamiento */ }
-      listeners.forEach(function (fn) { fn(); });
+    function alive(t, field) { var c = t && claims(t); return !!(c && Number(c[field]) * 1000 > Date.now() + 60000); }
+    try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { saved = null; }
+    function persist() {
+      try { if (saved) localStorage.setItem(KEY, JSON.stringify(saved)); else localStorage.removeItem(KEY); } catch (e) { /* sin almacenamiento */ }
+    }
+    function onGoogle(resp) {
+      if (!resp || !resp.credential || !exchange) return;
+      var m = $('login-msg'); if (m) m.textContent = 'Entrando…';
+      exchange(resp.credential).then(function (data) {
+        listeners.forEach(function (fn) { fn(data); });
+      }).catch(function (err) {
+        if (errorFn) errorFn(err);
+      });
     }
     function load() {
       if (ready) return ready;
@@ -685,25 +725,35 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
         document.head.appendChild(sc);
       }).then(function () {
         google.accounts.id.initialize({
-          client_id: clientId, auto_select: true, cancel_on_tap_outside: false, use_fedcm_for_prompt: true,
-          callback: function (resp) { if (resp && resp.credential) set(resp.credential); }
+          client_id: clientId, auto_select: true, cancel_on_tap_outside: false, use_fedcm_for_prompt: true, callback: onGoogle
         });
       });
       return ready;
     }
     return {
-      current: function () { return valid(token) ? token : null; },
+      credentials: function () {
+        if (saved && saved.s && alive(saved.s, 'x')) return { session: saved.s };
+        if (saved && saved.g && alive(saved.g, 'exp')) return { token: saved.g };
+        return null;
+      },
+      saveSession: function (s) { saved = { s: s }; persist(); },
+      saveLegacy: function (g) { saved = { g: g }; persist(); },
+      setExchange: function (fn) { exchange = fn; },
       onSignIn: function (fn) { listeners.push(fn); },
+      onError: function (fn) { errorFn = fn; },
       renderButton: function (el) {
         return load().then(function () {
           if (!el.isConnected) return;
-          google.accounts.id.renderButton(el, { type: 'standard', theme: 'outline', size: 'large', text: 'signin_with', shape: 'pill', locale: 'es', width: Math.min(320, el.clientWidth || 320) });
+          var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          google.accounts.id.renderButton(el, {
+            type: 'standard', theme: dark ? 'outline' : 'filled_black', size: 'large', text: 'continue_with',
+            shape: 'pill', logo_alignment: 'left', locale: 'es', width: Math.min(320, el.clientWidth || 320)
+          });
           google.accounts.id.prompt();
         });
       },
       signOut: function () {
-        token = null;
-        try { localStorage.removeItem(KEY); } catch (e) { /* sin almacenamiento */ }
+        saved = null; persist();
         if (window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
       }
     };
@@ -802,6 +852,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     if (!state.data && g !== 'login') return;
     renderStatus();
     document.body.classList.toggle('no-tabs', !!g);
+    document.body.classList.toggle('is-login', g === 'login');
     var html = g === 'login' ? viewLogin() : g === 'sin-correo' ? viewSinCorreo() : g === 'bloqueado' ? viewBloqueado() : g === 'bienvenida' ? viewBienvenida()
       : state.tab === 'ronda' ? viewRonda() : state.tab === 'cuentas' ? viewCuentas() : state.tab === 'historial' ? viewHistorial() : viewAjustes();
     // Lo que alguien está escribiendo no se pierde aunque lleguen datos nuevos mientras tanto.
@@ -831,11 +882,25 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     '<path d="M368 230h16a42 42 0 0 1 0 84h-24" stroke="#fff" stroke-width="24" fill="none" stroke-linecap="round"/>' +
     '<rect x="116" y="404" width="280" height="22" rx="11" fill="#fff"/></svg>';
 
+  var ICONS = {
+    cup: '<path d="M5 10h11v3.5A5.5 5.5 0 0 1 10.5 19h0A5.5 5.5 0 0 1 5 13.5z"/><path d="M16 11h1.5a2.5 2.5 0 0 1 0 5H15.5"/><path d="M8.5 3.5c-.9 1 .9 2 0 3.5M12 3.5c-.9 1 .9 2 0 3.5"/>',
+    scale: '<path d="M12 4v16M8 20h8M5 8h14"/><path d="M5 8l-2.5 6a2.5 2.5 0 0 0 5 0z"/><path d="M19 8l-2.5 6a2.5 2.5 0 0 0 5 0z"/>',
+    lock: '<rect x="5" y="10.5" width="14" height="9.5" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>'
+  };
+  function feature(icon, title, text) {
+    return '<li><svg viewBox="0 0 24 24" aria-hidden="true">' + ICONS[icon] + '</svg><div><b>' + esc(title) + '</b><span>' + esc(text) + '</span></div></li>';
+  }
+
   function viewLogin() {
-    return '<section class="welcome">' + APP_ICON + '<p class="eyebrow">Para usar la app</p>' +
-      '<h2 class="big">Entra con tu cuenta de Google</h2>' +
-      '<p>Así cada ronda y cada pago quedan apuntados a tu nombre.</p>' +
-      '<div id="gsi-button" class="gsi"></div><p class="note" id="login-msg"></p></section>';
+    return '<section class="login">' + APP_ICON +
+      '<h2 class="login-title">DesayuMango</h2>' +
+      '<p class="login-lead">El café de la oficina sin líos de cambio: uno paga la ronda y la app lleva las cuentas.</p>' +
+      '<ul class="features">' +
+        feature('cup', 'La ronda en segundos', 'Toca quién toma qué y sale el ticket para pedir en la barra.') +
+        feature('scale', 'Le toca a quien más debe', 'Las cuentas se equilibran solas, sin apuntar nada a mano.') +
+        feature('lock', 'Solo para el equipo', 'Cada uno entra con su cuenta de Google y lo que apunta va a su nombre.') +
+      '</ul>' +
+      '<div id="gsi-button" class="gsi"></div><p class="note" id="login-msg" role="status"></p></section>';
   }
 
   function viewBloqueado() {
@@ -1463,8 +1528,9 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     $('status').textContent = store.demo ? 'Demo' : 'Conectando…';
     if (store.api) {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { /* sin modo app */ });
-      store.auth.onSignIn(function () { state.needLogin = false; loadAll(); });
-      if (!store.auth.current()) { state.needLogin = true; render(); return; }
+      store.auth.onSignIn(function (data) { state.needLogin = false; setData(data); render(); });
+      store.auth.onError(function (err) { var m = $('login-msg'); if (m) m.textContent = err.message; });
+      if (!store.auth.credentials()) { state.needLogin = true; render(); return; }
     }
     loadAll();
   });
