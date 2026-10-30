@@ -1,6 +1,6 @@
 // Ronda de cafés: guarda la "carcasa" de la app para que se pueda instalar y abra rápido.
 // Los datos nunca se guardan aquí: siempre se piden al servidor (Apps Script) en directo.
-const CACHE = 'ronda-cafes-v1';
+const CACHE = 'ronda-cafes-v2';
 const SHELL = ['./', './index.html', './config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
