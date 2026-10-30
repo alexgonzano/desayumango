@@ -1,7 +1,7 @@
 // Ronda de cafés: guarda la "carcasa" de la app para que se pueda instalar y abra rápido.
 // Los datos nunca se guardan aquí: siempre se piden al servidor (Apps Script) en directo.
-const CACHE = 'ronda-cafes-v3';
-const SHELL = ['./', './index.html', './config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = 'ronda-cafes-v4';
+const SHELL = ['./', './index.html', './config.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
