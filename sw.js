@@ -29,3 +29,19 @@ self.addEventListener('fetch', (event) => {
       .catch(() => caches.match(req).then((r) => r || caches.match('./index.html')))
   );
 });
+
+// Avisos: el servidor manda el texto ya preparado ({title, body, tag}).
+// Con la misma tag, un aviso sustituye al anterior (por ejemplo, «Ronda anulada»).
+self.addEventListener('push', (event) => {
+  const d = event.data ? event.data.json() : {};
+  event.waitUntil(self.registration.showNotification(d.title || 'DesayuMango', {
+    body: d.body || '', tag: d.tag, icon: 'icon-192.png', lang: 'es'
+  }));
+});
+
+// Al tocar el aviso: a la app si ya está abierta; si no, se abre.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    .then((list) => (list.length ? list[0].focus() : self.clients.openWindow('./'))));
+});

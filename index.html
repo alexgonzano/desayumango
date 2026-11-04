@@ -2,8 +2,10 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover: la app se pinta también detrás de la barra de navegación de Android y del iPhone (con modo oscuro, sin franja blanca). Los márgenes ya usan env(safe-area-inset-*). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>DesayuMango</title>
+<meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
@@ -70,7 +72,7 @@ button:disabled { cursor: default; opacity: 0.4; }
 a { color: var(--accent); text-decoration: none; }
 
 .app { max-width: 680px; margin: 0 auto; padding: calc(16px + env(safe-area-inset-top)) 16px calc(112px + env(safe-area-inset-bottom)); }
-body.no-tabs .app { padding-bottom: 48px; }
+body.no-tabs .app { padding-bottom: calc(48px + env(safe-area-inset-bottom)); }
 
 /* Cabecera: título grande al estilo iOS */
 .top { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin: 12px 0 24px; }
@@ -348,7 +350,7 @@ body.is-login .top { display: none; }
 }
 .notice > span { position: relative; padding-left: 18px; }
 .notice > span::before { content: ""; position: absolute; left: 0; top: 0.5em; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-.notice .btn { flex: none; }
+.notice .btn, .notice .link { flex: none; }
 
 /* Aviso flotante */
 .toast {
@@ -367,6 +369,20 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } }
 
 .loading { padding: 48px 0; text-align: center; color: var(--muted); font-size: 15px; }
+
+/* Cargando: rueda a pantalla completa. La app se ve detrás, pero no se puede tocar.
+   Aparece con un pequeño retraso para que no parpadee si el servidor contesta enseguida. */
+.busy {
+  position: fixed; inset: 0; z-index: 50; display: none; place-items: center;
+  background: rgba(0, 0, 0, 0.25); animation: fade 0.2s var(--ease) 0.15s both;
+}
+body.is-busy .busy { display: grid; }
+.busy span { display: grid; place-items: center; width: 76px; height: 76px; border-radius: 18px; background: rgba(30, 30, 32, 0.9); }
+.busy span::before {
+  content: ""; width: 30px; height: 30px; border-radius: 50%;
+  border: 3px solid #ffffff; border-right-color: transparent; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -393,6 +409,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
 <div id="ticket"></div>
 <div id="sheet-root"></div>
 <div id="toast-root" aria-live="polite"></div>
+<div class="busy" aria-hidden="true"><span></span></div>
 
 <script>
 (function () {
@@ -684,7 +701,8 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
       addPayment: action('guardarPago'), deletePayment: action('borrarPago'),
       savePeople: action('guardarPersonas'), saveProducts: action('guardarProductos'),
       requestAccess: action('solicitarAcceso'), approveAccess: action('aprobarAcceso'),
-      rejectAccess: action('rechazarAcceso'), removeAccess: action('quitarAcceso')
+      rejectAccess: action('rechazarAcceso'), removeAccess: action('quitarAcceso'),
+      savePush: action('guardarAviso')
     };
   }
 
@@ -708,9 +726,12 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     function onGoogle(resp) {
       if (!resp || !resp.credential || !exchange) return;
       var m = $('login-msg'); if (m) m.textContent = 'Entrando…';
+      spinner(true);
       exchange(resp.credential).then(function (data) {
+        spinner(false);
         listeners.forEach(function (fn) { fn(data); });
       }).catch(function (err) {
+        spinner(false);
         if (errorFn) errorFn(err);
       });
     }
@@ -795,6 +816,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
       payments: d.payments || [],
       sheetUrl: d.sheetUrl || '',
       appUrl: d.appUrl || '',
+      pushKey: d.pushKey || '',
       access: { requests: (d.access && d.access.requests) || [], list: (d.access && d.access.list) || null }
     };
     data.rounds.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
@@ -969,7 +991,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
       return '<div class="empty"><h3>Primero, el equipo</h3><p>Añade a las personas que bajáis a por café. Solo hace falta el nombre.</p>' +
         '<button class="btn" data-act="tab" data-tab="ajustes">Añadir personas</button></div>';
     }
-    var notice = accessNotice();
+    var notice = accessNotice() || pushNotice();
     var payer = currentPayer(), sug = suggestion();
     var chips = names.map(function (n) {
       return '<button class="chip" data-act="payer" data-name="' + esc(n) + '" aria-pressed="' + (n === payer) + '">' + esc(n) +
@@ -1167,7 +1189,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
         '<button class="btn small" type="button" data-act="grant"' + dis + '>Dar acceso</button></div>' +
         '<p class="note">Solo tú, como dueño, ves esta lista y puedes quitar o dar acceso sin solicitud. Quien deja de tener acceso conserva sus cuentas.</p></section>';
     }
-    return account + requests + accessList + install + '<section><h2>Personas</h2>' + people + '<p class="note">Quien entra con su cuenta de Google se añade solo. Aquí puedes añadir a quien no use la app. Si alguien con cuentas pendientes deja de bajar, se oculta de la ronda pero sus cuentas se conservan.</p></section>' +
+    return account + viewAvisos() + requests + accessList + install + '<section><h2>Personas</h2>' + people + '<p class="note">Quien entra con su cuenta de Google se añade solo. Aquí puedes añadir a quien no use la app. Si alguien con cuentas pendientes deja de bajar, se oculta de la ronda pero sus cuentas se conservan.</p></section>' +
       '<section><h2>Productos y precios</h2>' + products + '<p class="note">Los cambios de precio valen para las rondas nuevas. Las ya apuntadas no cambian.</p></section>' +
       '<section><h2>Dónde se guarda</h2>' + sheet + '</section>';
   }
@@ -1206,6 +1228,9 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     root.querySelector('.sheet').focus({ preventScroll: true });
   }
 
+  // Rueda a pantalla completa mientras se carga o se guarda (no se usa al refrescar en segundo plano).
+  function spinner(on) { document.body.classList.toggle('is-busy', on); $('main').setAttribute('aria-busy', String(on)); }
+
   function toast(msg, action) {
     clearTimeout(state.toastTimer);
     var root = $('toast-root');
@@ -1217,13 +1242,13 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
   /* ---------- Acciones ---------- */
   function run(promise) {
     state.writes = (state.writes || 0) + 1;
-    state.busy = true; render();
+    state.busy = true; spinner(true); render();
     return Promise.resolve(promise).then(function (data) {
       setData(data); return data;
     }).catch(function (err) {
       toast('No se ha podido guardar: ' + String((err && err.message) || err).replace(/\.$/, '') + '. Inténtalo otra vez.');
       return null;
-    }).then(function (res) { state.busy = false; render(); return res; });
+    }).then(function (res) { state.busy = false; spinner(false); render(); return res; });
   }
 
   function savePeople(list, okMsg) {
@@ -1499,6 +1524,56 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
   function isStandalone() { return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; }
   function isIOS() { return /iPhone|iPad|iPod/.test(navigator.userAgent); }
 
+  /* ---------- Avisos (notificaciones push) ---------- */
+  // Solo si el servidor da su clave pública (pushKey). En iPhone, solo con la app añadida a la pantalla de inicio.
+  var PUSH_OFF_KEY = 'ronda-cafes-avisos-no', pushOff = false;
+  try { pushOff = localStorage.getItem(PUSH_OFF_KEY) === '1'; } catch (e) { /* sin almacenamiento */ }
+  function setPushOff(v) {
+    pushOff = v;
+    try { if (v) localStorage.setItem(PUSH_OFF_KEY, '1'); else localStorage.removeItem(PUSH_OFF_KEY); } catch (e) { /* sin almacenamiento: dura hasta cerrar */ }
+  }
+  function pushReady() {
+    return !!(store && store.api && state.data && state.data.pushKey && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window);
+  }
+  // Se manda al servidor cada vez que se abre la app: así, si la había perdido, la recupera.
+  function pushSubscribe() {
+    var key = Uint8Array.from(atob(state.data.pushKey.replace(/-/g, '+').replace(/_/g, '/')), function (c) { return c.charCodeAt(0); });
+    return navigator.serviceWorker.ready.then(function (reg) {
+      return reg.pushManager.getSubscription().then(function (sub) {
+        return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      });
+    }).then(function (sub) { return store.savePush(sub.toJSON()); });
+  }
+  function syncPush() {
+    if (pushReady() && Notification.permission === 'granted' && !pushOff) pushSubscribe().catch(function () { /* se reintenta la próxima vez */ });
+  }
+  // El permiso del navegador se pide solo al tocar «Activar»: si sale sin avisar, mucha gente lo bloquea y ya no se puede volver a pedir.
+  function pushNotice() {
+    if (!pushReady() || pushOff || Notification.permission !== 'default') return '';
+    return '<div class="notice" role="status"><span>¿Te avisamos cuando alguien te apunte en una ronda o un pago?</span>' +
+      '<button class="link" type="button" data-act="push-later">Ahora no</button>' +
+      '<button class="btn small" type="button" data-act="push-on">Activar</button></div>';
+  }
+  function viewAvisos() {
+    if (!pushReady()) return '';
+    var perm = Notification.permission;
+    return '<section><h2>Avisos</h2><div class="card">' +
+      (perm === 'granted' && !pushOff ? '<p>Activados en este dispositivo: te llega un aviso cuando alguien te apunta en una ronda o un pago.</p>'
+        : perm === 'denied' ? '<p>Están bloqueados en este dispositivo. Para activarlos, abre los ajustes de la app o del sitio y permite las notificaciones.</p>'
+        : '<p>Te avisamos cuando alguien te apunte en una ronda o un pago.</p><button class="btn small" type="button" data-act="push-on">Activar avisos</button>') +
+      '</div></section>';
+  }
+  actions['push-on'] = function () {
+    setPushOff(false);
+    Notification.requestPermission().then(function (perm) {
+      render();
+      if (perm === 'granted') return pushSubscribe().then(function () { toast('Avisos activados.'); });
+    }).catch(function (err) {
+      toast('No se han podido activar los avisos: ' + String((err && err.message) || err).replace(/\.$/, '') + '.');
+    });
+  };
+  actions['push-later'] = function () { setPushOff(true); render(); };
+
   /* ---------- Arranque ---------- */
   $('today').textContent = cap(fmtDay.format(new Date()));
 
@@ -1509,10 +1584,14 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
 
   function loadAll() {
     if (!state.data) $('main').innerHTML = '<p class="loading">Cargando cafés…</p>';
+    spinner(true);
     store.load().then(function (d) {
+      spinner(false);
       setData(d);
       render();
+      syncPush();
     }).catch(function (err) {
+      spinner(false);
       if (err && err.code === 'login') { render(); return; }
       showError('No se pudo cargar', (err && err.message) || String(err));
     });
@@ -1528,7 +1607,7 @@ body.no-tabs .toast { bottom: calc(24px + env(safe-area-inset-bottom)); }
     $('status').textContent = store.demo ? 'Demo' : 'Conectando…';
     if (store.api) {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () { /* sin modo app */ });
-      store.auth.onSignIn(function (data) { state.needLogin = false; setData(data); render(); });
+      store.auth.onSignIn(function (data) { state.needLogin = false; setData(data); render(); syncPush(); });
       store.auth.onError(function (err) { var m = $('login-msg'); if (m) m.textContent = err.message; });
       if (!store.auth.credentials()) { state.needLogin = true; render(); return; }
     }

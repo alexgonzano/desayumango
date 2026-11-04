@@ -1,3 +1,54 @@
+/**
+ * DESAYUMANGO · servidor en Google Sheets (con inicio de sesión de Google)
+ *
+ * Cada persona entra con su cuenta de Google. La primera vez elige su nombre y queda
+ * dada de alta en la pestaña Personas. Cada ronda y cada pago guardan quién lo apuntó.
+ *
+ * Instalación (una sola vez):
+ *  1. Crea una hoja de cálculo nueva en Google Drive.
+ *  2. Extensiones > Apps Script. Borra lo que haya en Código.gs y pega este archivo.
+ *  3. Añade un archivo HTML (botón + > HTML) llamado exactamente "Index" y pega Index.html.
+ *  4. Elige la función "configurar" arriba y pulsa Ejecutar. Acepta los permisos.
+ *  5. Implementar > Nueva implementación > Tipo: Aplicación web. Elige UNA de estas opciones:
+ *
+ *     A) Si en la empresa usáis Google Workspace (correo de empresa con Gmail) y has creado
+ *        la hoja con esa cuenta:
+ *          Ejecutar como: Yo
+ *          Quién tiene acceso: Cualquier usuario de <tu empresa>
+ *
+ *     B) Si cada uno usa su Gmail personal:
+ *          Ejecutar como: Usuario que accede a la aplicación web
+ *          Quién tiene acceso: Cualquier usuario con una cuenta de Google
+ *        y comparte la hoja de cálculo con cada compañero como Editor.
+ *        La primera vez, Google le pedirá permiso a cada uno (pulsar Configuración avanzada > Ir a...).
+ *
+ *     OJO: con "Quién tiene acceso: Cualquier usuario" (sin "con una cuenta de Google") Google
+ *     no pide iniciar sesión. Y con "Ejecutar como: Yo" y cuentas de Gmail personales, Google
+ *     no dice quién entra. En los dos casos la app muestra un aviso con los pasos para arreglarlo.
+ *
+ *  6. Copia la URL que termina en /exec y pásala al grupo.
+ *
+ * Si cambias el código: Implementar > Gestionar implementaciones > lápiz > Versión: nueva versión.
+ * Si ya tenías la versión anterior instalada, las pestañas se actualizan solas al abrir la app.
+ *
+ * VERSIÓN EN GITHUB (la web vive en GitHub Pages y este archivo hace de servidor):
+ *  - GOOGLE_CLIENT_ID (justo debajo) es el ID de cliente de Google (Google Cloud > Clientes).
+ *    Es el mismo que va en config.js.
+ *  - Crea OTRA implementación de tipo Aplicación web con:
+ *      Ejecutar como: Yo
+ *      Quién tiene acceso: Cualquier usuario
+ *    Aquí "Cualquier usuario" es correcto: quién entra lo controla el botón de Google
+ *    y la pestaña Permitidos, que se comprueban en cada petición.
+ *  - Quien no tiene acceso lo pide desde la app y cualquiera del equipo lo acepta (pestaña Solicitudes).
+ *    Al aceptarlo se apunta solo en Permitidos; también puedes escribir ahí un correo por fila,
+ *    o @tuempresa.com para todo un dominio. Quien ejecutó "configurar" (el dueño) siempre tiene acceso,
+ *    y desde la app puede dar y quitar acceso sin solicitud.
+ *  - Al entrar con Google, la app recibe una sesión propia de DIAS_SESION días que se renueva sola.
+ *    Para cerrar todas las sesiones a la vez, borra SECRETO_SESION en Propiedades del script.
+ *  - Avisos en el móvil (opcional): añade el archivo Avisos.gs y sigue los pasos de su cabecera.
+ */
+
+// ID de cliente de Google para la versión en GitHub. No es secreto: va en todas las páginas que abre la app.
 var GOOGLE_CLIENT_ID = '141212573757-g76sf6huqj4bj1dannkai11tpiuuflia.apps.googleusercontent.com';
 
 var HOJAS = {
@@ -6,7 +57,8 @@ var HOJAS = {
   Personas: ['Nombre', 'Email', 'Activo'],
   Productos: ['Producto', 'Precio'],
   Permitidos: ['Correo o dominio'],
-  Solicitudes: ['Correo', 'Nombre', 'Fecha']
+  Solicitudes: ['Correo', 'Nombre', 'Fecha'],
+  Avisos: ['Correo', 'Dirección', 'p256dh', 'auth', 'Fecha']
 };
 var MAX_SOLICITUDES = 30;
 var DIAS_SESION = 30; // la sesión de la app dura esto y se renueva sola si se usa
@@ -115,6 +167,7 @@ function cargarDatos() {
     payments: payments,
     sheetUrl: ss.getUrl(),
     appUrl: urlApp_(),
+    pushKey: clavePublicaAvisos_(),
     access: {
       requests: solicitudes,
       // La lista completa de quién tiene acceso solo la ve el dueño, que es quien puede quitarlo.
@@ -179,34 +232,47 @@ function guardarRonda(ronda) {
   var pagador = texto_(ronda && ronda.payer);
   var items = (ronda && ronda.items) || [];
   if (!pagador || !items.length) throw new Error('La ronda necesita quién paga y al menos un café');
-  return conBloqueo_(function (ss, yo) {
+  return conBloqueo_(function (ss, yo, avisar) {
     var id = nuevoId_(), ahora = new Date();
     var filas = items.map(function (it) {
       return [id, ahora, pagador, texto_(it.person), texto_(it.product), redondear_(numero_(it.price)), yo.email];
     });
     var h = ss.getSheetByName('Rondas');
     h.getRange(h.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
+    avisar('ronda-' + id, textosRonda_(yo.name, filas, false));
     return id;
   });
 }
 
 function borrarRonda(id) {
-  return conBloqueo_(function (ss) { borrarFilas_(ss.getSheetByName('Rondas'), texto_(id)); });
+  return conBloqueo_(function (ss, yo, avisar) {
+    var rid = texto_(id);
+    var filas = filas_(ss, 'Rondas').filter(function (r) { return rid && texto_(r[0]) === rid && texto_(r[3]); });
+    borrarFilas_(ss.getSheetByName('Rondas'), rid);
+    if (filas.length) avisar('ronda-' + rid, textosRonda_(yo.name, filas, true));
+  });
 }
 
 function guardarPago(pago) {
   var de = texto_(pago && pago.from), para = texto_(pago && pago.to), importe = redondear_(numero_(pago && pago.amount));
   if (!de || !para || !(importe > 0)) throw new Error('Pago incompleto');
-  return conBloqueo_(function (ss, yo) {
+  return conBloqueo_(function (ss, yo, avisar) {
     var id = nuevoId_();
+    var fila = [id, new Date(), de, para, importe, yo.email];
     var h = ss.getSheetByName('Pagos');
-    h.getRange(h.getLastRow() + 1, 1, 1, 6).setValues([[id, new Date(), de, para, importe, yo.email]]);
+    h.getRange(h.getLastRow() + 1, 1, 1, 6).setValues([fila]);
+    avisar('pago-' + id, textosPago_(yo.name, fila, false));
     return id;
   });
 }
 
 function borrarPago(id) {
-  return conBloqueo_(function (ss) { borrarFilas_(ss.getSheetByName('Pagos'), texto_(id)); });
+  return conBloqueo_(function (ss, yo, avisar) {
+    var pid = texto_(id);
+    var fila = filas_(ss, 'Pagos').filter(function (r) { return pid && texto_(r[0]) === pid; })[0];
+    borrarFilas_(ss.getSheetByName('Pagos'), pid);
+    if (fila) avisar('pago-' + pid, textosPago_(yo.name, fila, true));
+  });
 }
 
 /** Guarda la lista de personas (nombre y si siguen bajando). Los correos ya unidos se conservan. */
@@ -298,6 +364,125 @@ function quitarAcceso(entrada) {
   });
 }
 
+/* ---------- Avisos en el móvil: a quién y qué se le dice (el cifrado está en Avisos.gs) ---------- */
+
+/** Guarda este dispositivo para mandarle avisos. La web lo manda cada vez que se abre. */
+function guardarAviso(sub) {
+  var endpoint = texto_(sub && sub.endpoint), p256dh = texto_(sub && sub.keys && sub.keys.p256dh), auth = texto_(sub && sub.keys && sub.keys.auth);
+  // Solo direcciones de los servicios de avisos de los navegadores: este servidor no manda nada a ningún otro sitio.
+  if (!/^https:\/\/(fcm\.googleapis\.com|updates\.push\.services\.mozilla\.com|web\.push\.apple\.com|[a-z0-9-]+\.notify\.windows\.com)\/\S+$/.test(endpoint) ||
+      endpoint.length > 1000 || !/^[\w-]{86,88}=*$/.test(p256dh) || !/^[\w-]{22,24}=*$/.test(auth)) {
+    throw new Error('Este navegador ha dado unos datos de avisos que no son válidos');
+  }
+  return conBloqueo_(function (ss, yo) {
+    var h = ss.getSheetByName('Avisos'), filas = filas_(ss, 'Avisos');
+    for (var i = 0; i < filas.length; i++) {
+      if (texto_(filas[i][1]) !== endpoint) continue;
+      // Ya estaba. Si ahora entra otra cuenta desde el mismo navegador, los avisos pasan a ser suyos.
+      if (correo_(filas[i][0]) !== yo.email || texto_(filas[i][2]) !== p256dh || texto_(filas[i][3]) !== auth) {
+        h.getRange(i + 2, 1, 1, 4).setValues([[yo.email, endpoint, p256dh, auth]]);
+      }
+      return;
+    }
+    h.getRange(h.getLastRow() + 1, 1, 1, 5).setValues([[yo.email, endpoint, p256dh, auth, new Date()]]);
+  }, { sinAlta: true, sinDatos: true });
+}
+
+/** Textos de una ronda (filas como las de la pestaña Rondas) para quien pagó y para cada uno que tomó algo. */
+function textosRonda_(quien, filas, borrada) {
+  var pagador = texto_(filas[0][2]), total = 0, deOtros = 0, porPersona = {}, textos = {};
+  filas.forEach(function (r) {
+    var persona = texto_(r[3]), centimos = Math.round(numero_(r[5]) * 100);
+    total += centimos;
+    if (persona === pagador) return;
+    deOtros += centimos;
+    var p = porPersona[persona] = porPersona[persona] || { productos: [], centimos: 0 };
+    p.productos.push(texto_(r[4]));
+    p.centimos += centimos;
+  });
+  Object.keys(porPersona).forEach(function (persona) {
+    var p = porPersona[persona];
+    textos[persona] = borrada
+      ? { title: 'Ronda anulada', body: quien + ' ha borrado la ronda que pagó ' + pagador + '. Ya no le debes ' + euros_(p.centimos) + '.' }
+      : { title: '☕ ' + pagador + ' ha pagado la ronda', body: lista_(p.productos) + ': ' + euros_(p.centimos) + '. Se lo debes a ' + pagador + '.' };
+  });
+  var n = filas.length;
+  textos[pagador] = borrada
+    ? { title: 'Ronda anulada', body: quien + ' ha borrado tu ronda de ' + euros_(total) + '.' }
+    : { title: quien + ' ha apuntado tu ronda',
+        body: 'Pagaste ' + n + (n === 1 ? ' café' : ' cafés') + ' (' + euros_(total) + ').' + (deOtros ? ' Te deben ' + euros_(deOtros) + '.' : '') };
+  return textos;
+}
+
+/** Textos de un pago (fila como las de la pestaña Pagos) para quien devolvió el dinero y quien lo recibió. */
+function textosPago_(quien, fila, borrado) {
+  var de = texto_(fila[2]), para = texto_(fila[3]), importe = euros_(Math.round(numero_(fila[4]) * 100)), textos = {};
+  textos[de] = borrado
+    ? { title: 'Pago anulado', body: quien + ' ha borrado tu pago de ' + importe + ' a ' + para + '.' }
+    : { title: quien + ' ha apuntado tu pago', body: 'Le devolviste ' + importe + ' a ' + para + '.' };
+  textos[para] = borrado
+    ? { title: 'Pago anulado', body: quien + ' ha borrado el pago de ' + importe + ' que te hizo ' + de + '.' }
+    : { title: de + ' te ha devuelto ' + importe, body: quien === de ? 'Ya está apuntado en las cuentas.' : 'Lo ha apuntado ' + quien + '.' };
+  return textos;
+}
+
+/** Un aviso por dispositivo para cada persona de «textos» que tiene cuenta, menos quien lo ha hecho. */
+function destinatarios_(ss, yo, tag, textos) {
+  var correoDe = {}, avisos = [];
+  filas_(ss, 'Personas').forEach(function (r) { if (texto_(r[0]) && correo_(r[1])) correoDe[texto_(r[0]).toLowerCase()] = correo_(r[1]); });
+  var dispositivos = filas_(ss, 'Avisos');
+  Object.keys(textos).forEach(function (nombre) {
+    var correo = correoDe[nombre.toLowerCase()];
+    if (!correo || correo === yo.email) return;
+    dispositivos.forEach(function (r) {
+      if (correo_(r[0]) !== correo) return;
+      avisos.push({ endpoint: texto_(r[1]), p256dh: texto_(r[2]), auth: texto_(r[3]), mensaje: { title: textos[nombre].title, body: textos[nombre].body, tag: tag } });
+    });
+  });
+  return avisos;
+}
+
+/** Manda los avisos. Si falla, no pasa nada: lo apuntado ya está guardado. */
+function enviarAvisos_(avisos) {
+  if (!avisos.length || !clavePublicaAvisos_()) return;
+  try {
+    var respuestas = UrlFetchApp.fetchAll(avisos.map(function (a) { return peticionAviso_(a, a.mensaje); }));
+    var caducados = [];
+    respuestas.forEach(function (r, i) {
+      var c = r.getResponseCode();
+      if (c === 404 || c === 410) caducados.push(avisos[i].endpoint); // app desinstalada o avisos desactivados
+      else if (c >= 300) console.warn('Aviso no entregado (' + c + '): ' + r.getContentText().slice(0, 300));
+    });
+    if (caducados.length) borrarDispositivos_(caducados);
+  } catch (err) {
+    console.error('No se han podido mandar los avisos: ' + ((err && err.stack) || err));
+  }
+}
+
+/** Quita de la pestaña Avisos los dispositivos que el servicio de avisos ya no reconoce. */
+function borrarDispositivos_(endpoints) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var h = libro_().getSheetByName('Avisos'), n = h.getLastRow() - 1;
+    if (n < 1) return;
+    var col = h.getRange(2, 2, n, 1).getValues();
+    for (var i = col.length - 1; i >= 0; i--) if (endpoints.indexOf(texto_(col[i][0])) >= 0) h.deleteRow(i + 2);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** «2× Cortado y Cola Cao» */
+function lista_(productos) {
+  var cuenta = {}, orden = [];
+  productos.forEach(function (p) { if (!cuenta[p]) orden.push(p); cuenta[p] = (cuenta[p] || 0) + 1; });
+  var partes = orden.map(function (p) { return (cuenta[p] > 1 ? cuenta[p] + '× ' : '') + p; });
+  return partes.length > 1 ? partes.slice(0, -1).join(', ') + ' y ' + partes[partes.length - 1] : partes[0];
+}
+
+function euros_(centimos) { return (centimos / 100).toFixed(2).replace('.', ',') + ' €'; }
+
 /* ---------- Versión GitHub: la web llama aquí con fetch ---------- */
 
 /** Recibe {action, args, token} y responde {ok, data} o {ok:false, error, code}. */
@@ -306,7 +491,8 @@ function doPost(e) {
     cargarDatos: cargarDatos, registrarme: registrarme, cambiarMiNombre: cambiarMiNombre,
     guardarRonda: guardarRonda, borrarRonda: borrarRonda, guardarPago: guardarPago, borrarPago: borrarPago,
     guardarPersonas: guardarPersonas, guardarProductos: guardarProductos,
-    solicitarAcceso: solicitarAcceso, aprobarAcceso: aprobarAcceso, rechazarAcceso: rechazarAcceso, quitarAcceso: quitarAcceso
+    solicitarAcceso: solicitarAcceso, aprobarAcceso: aprobarAcceso, rechazarAcceso: rechazarAcceso, quitarAcceso: quitarAcceso,
+    guardarAviso: guardarAviso
   };
   var salida;
   try {
@@ -485,6 +671,9 @@ function asegurar_(ss) {
       h.getRange('C1').setValue('Correos con acceso. Se rellena sola al aceptar solicitudes en la app; también puedes escribir ' +
         'un correo por fila o un dominio entero (@tuempresa.com). Vacía: en la versión de Apps Script entra quien tenga acceso a la hoja; en la de GitHub, solo el dueño.');
       h.getRange('C1').setFontColor('#666666');
+    } else if (nombre === 'Avisos') {
+      h.getRange('B:D').setNumberFormat('@'); // texto tal cual, que la hoja no lo tome por números o fechas
+      h.getRange('E:E').setNumberFormat(FORMATO_FECHA);
     }
   });
   var props = PropertiesService.getScriptProperties();
@@ -532,8 +721,9 @@ function crearSaldos_(ss) {
   h.setColumnWidth(3, 110);
 }
 
+/** Hace un cambio con la hoja bloqueada. fn(ss, yo, avisar) puede pedir avisos con avisar(tag, textos por nombre). */
 function conBloqueo_(fn, opciones) {
-  var lock = LockService.getScriptLock();
+  var lock = LockService.getScriptLock(), avisos = [], datos;
   lock.waitLock(20000);
   try {
     var ss = libro_();
@@ -542,14 +732,16 @@ function conBloqueo_(fn, opciones) {
     if (!yo.email) throw new Error(SIN_CORREO);
     if (yo.blocked && !(opciones && opciones.bloqueado)) throw new Error(SIN_PERMISO);
     if (!yo.name && !(opciones && opciones.sinAlta)) throw new Error(SIN_ALTA);
-    var id = fn(ss, yo);
+    var id = fn(ss, yo, function (tag, textos) { avisos = avisos.concat(destinatarios_(ss, yo, tag, textos)); });
     SpreadsheetApp.flush();
-    var datos = cargarDatos();
+    if (opciones && opciones.sinDatos) return true;
+    datos = cargarDatos();
     if (id) datos.lastId = id;
-    return datos;
   } finally {
     lock.releaseLock();
   }
+  enviarAvisos_(avisos); // ya sin el bloqueo, para no hacer esperar a los demás
+  return datos;
 }
 
 function filas_(ss, nombre) {

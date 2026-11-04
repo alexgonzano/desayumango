@@ -10,11 +10,13 @@ Los datos no están en este repositorio. Se guardan en una hoja de Google Sheets
 | --- | --- |
 | `index.html` | La app |
 | `config.js` | Dirección del Apps Script e ID de cliente de Google |
-| `manifest.webmanifest`, `sw.js`, `icons/` | Para que se pueda instalar en el móvil |
-| `apps-script/Codigo.gs` | Copia del código del servidor, que se pega en Apps Script |
+| `manifest.webmanifest`, `sw.js`, `icon-*.png` | Para que se pueda instalar en el móvil y reciba avisos |
+| `Codigo.gs` | Copia del código del servidor, que se pega en Apps Script |
+| `Avisos.gs` | Cifrado de los avisos en el móvil. Se pega en Apps Script junto a `Codigo.gs` (pasos en su cabecera) |
+| `avisos.test.js`, `cuentas.test.js` | Comprobaciones de los avisos y de las cuentas: `node avisos.test.js && node cuentas.test.js` |
 
 ## Licencia
 
 Copyright (c) 2026. Todos los derechos reservados. El código es visible, pero no se permite usarlo, copiarlo, modificarlo ni distribuirlo sin permiso por escrito. Ver `LICENSE`.
 
-La tipografía Doto tiene su propia licencia (SIL Open Font License 1.1). Ver `LICENCIAS-TERCEROS.md`.
+La tipografía Doto (SIL Open Font License 1.1) y las librerías noble que van dentro de `Avisos.gs` (MIT) tienen su propia licencia. Ver `LICENCIAS-TERCEROS.md`.
