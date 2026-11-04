@@ -1,57 +1,15 @@
-/**
- * RONDA DE CAFÉS · servidor en Google Sheets (con inicio de sesión de Google)
- *
- * Cada persona entra con su cuenta de Google. La primera vez elige su nombre y queda
- * dada de alta en la pestaña Personas. Cada ronda y cada pago guardan quién lo apuntó.
- *
- * Instalación (una sola vez):
- *  1. Crea una hoja de cálculo nueva en Google Drive.
- *  2. Extensiones > Apps Script. Borra lo que haya en Código.gs y pega este archivo.
- *  3. Añade un archivo HTML (botón + > HTML) llamado exactamente "Index" y pega Index.html.
- *  4. Elige la función "configurar" arriba y pulsa Ejecutar. Acepta los permisos.
- *  5. Implementar > Nueva implementación > Tipo: Aplicación web. Elige UNA de estas opciones:
- *
- *     A) Si en la empresa usáis Google Workspace (correo de empresa con Gmail) y has creado
- *        la hoja con esa cuenta:
- *          Ejecutar como: Yo
- *          Quién tiene acceso: Cualquier usuario de <tu empresa>
- *
- *     B) Si cada uno usa su Gmail personal:
- *          Ejecutar como: Usuario que accede a la aplicación web
- *          Quién tiene acceso: Cualquier usuario con una cuenta de Google
- *        y comparte la hoja de cálculo con cada compañero como Editor.
- *        La primera vez, Google le pedirá permiso a cada uno (pulsar Configuración avanzada > Ir a...).
- *
- *     OJO: con "Quién tiene acceso: Cualquier usuario" (sin "con una cuenta de Google") Google
- *     no pide iniciar sesión. Y con "Ejecutar como: Yo" y cuentas de Gmail personales, Google
- *     no dice quién entra. En los dos casos la app muestra un aviso con los pasos para arreglarlo.
- *
- *  6. Copia la URL que termina en /exec y pásala al grupo.
- *
- * Si cambias el código: Implementar > Gestionar implementaciones > lápiz > Versión: nueva versión.
- * Si ya tenías la versión anterior instalada, las pestañas se actualizan solas al abrir la app.
- *
- * VERSIÓN EN GITHUB (la web vive en GitHub Pages y este archivo hace de servidor):
- *  - Pega tu ID de cliente de Google en GOOGLE_CLIENT_ID (justo debajo).
- *  - Crea OTRA implementación de tipo Aplicación web con:
- *      Ejecutar como: Yo
- *      Quién tiene acceso: Cualquier usuario
- *    Aquí "Cualquier usuario" es correcto: quién entra lo controla el botón de Google
- *    y la pestaña Permitidos, que se comprueban en cada petición.
- *  - En la pestaña Permitidos escribe un correo por fila, o @tuempresa.com para todo un dominio.
- *    Quien ejecutó "configurar" (el dueño) siempre tiene acceso.
- */
-
-// ID de cliente de Google para la versión en GitHub (Google Cloud > Clientes). No es secreto.
-var GOOGLE_CLIENT_ID = 'PEGA_AQUI_TU_ID_DE_CLIENTE.apps.googleusercontent.com';
+var GOOGLE_CLIENT_ID = '141212573757-g76sf6huqj4bj1dannkai11tpiuuflia.apps.googleusercontent.com';
 
 var HOJAS = {
   Rondas: ['ID', 'Fecha', 'Pagó', 'Persona', 'Producto', 'Precio', 'Apuntado por'],
   Pagos: ['ID', 'Fecha', 'De', 'Para', 'Importe', 'Apuntado por'],
   Personas: ['Nombre', 'Email', 'Activo'],
   Productos: ['Producto', 'Precio'],
-  Permitidos: ['Correo o dominio']
+  Permitidos: ['Correo o dominio'],
+  Solicitudes: ['Correo', 'Nombre', 'Fecha']
 };
+var MAX_SOLICITUDES = 30;
+var DIAS_SESION = 30; // la sesión de la app dura esto y se renueva sola si se usa
 var ESQUEMA = '2';
 
 var PRODUCTOS_INICIALES = [
@@ -69,7 +27,7 @@ var FORMATO_EUR = '#,##0.00 "€"';
 var FORMATO_FECHA = 'dd/mm/yyyy hh:mm';
 var SIN_CORREO = 'No puedo saber con qué cuenta de Google has entrado. Quien instaló la app tiene que revisar cómo está implementada (instrucciones al principio de Codigo.gs).';
 var SIN_ALTA = 'Antes de apuntar nada, elige tu nombre. Recarga la página.';
-var SIN_PERMISO = 'Tu cuenta no tiene acceso a esta app. Pide a quien la gestiona que te añada a la pestaña Permitidos.';
+var SIN_PERMISO = 'Tu cuenta no tiene acceso a esta app. Pide acceso desde la app y espera a que alguien del equipo lo acepte.';
 
 // Solo durante una petición de la versión GitHub: el correo sale del token de Google ya verificado.
 var MODO_API_ = false;
@@ -79,7 +37,7 @@ var CORREO_API_ = '';
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
-    .setTitle('Ronda de cafés')
+    .setTitle('DesayuMango')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
@@ -104,7 +62,13 @@ function cargarDatos() {
 
   var filasPersonas = filas_(ss, 'Personas');
   var me = usuario_(ss, filasPersonas);
+  var solicitudes = filas_(ss, 'Solicitudes')
+    .filter(function (r) { return correo_(r[0]); })
+    .map(function (r) { return { email: correo_(r[0]), name: texto_(r[1]), date: fecha_(r[2]) }; });
   if (!me.email || me.blocked) {
+    // A quien no tiene acceso solo se le dice si ya pidió entrar.
+    var mia = solicitudes.filter(function (x) { return x.email === me.email; })[0];
+    if (me.email) { me.requested = !!mia; me.requestedName = mia ? mia.name : ''; }
     return { me: me, people: [], products: [], rounds: [], payments: [], sheetUrl: '', appUrl: urlApp_() };
   }
   var nombrePorCorreo = {};
@@ -150,7 +114,13 @@ function cargarDatos() {
     rounds: orden.map(function (id) { return porId[id]; }),
     payments: payments,
     sheetUrl: ss.getUrl(),
-    appUrl: urlApp_()
+    appUrl: urlApp_(),
+    access: {
+      requests: solicitudes,
+      // La lista completa de quién tiene acceso solo la ve el dueño, que es quien puede quitarlo.
+      list: me.owner ? filas_(ss, 'Permitidos').map(function (r) { return correo_(r[0]); }).filter(function (x) { return x; })
+        .map(function (e) { return { entry: e, name: nombrePorCorreo[e] || '' }; }) : null
+    }
   };
 }
 
@@ -275,6 +245,59 @@ function guardarProductos(lista) {
   });
 }
 
+/* ---------- Acceso: pedir, aceptar, rechazar y quitar ---------- */
+
+/** Quien no tiene acceso pide entrar. Queda pendiente hasta que alguien del equipo la acepte. */
+function solicitarAcceso(nombre) {
+  nombre = texto_(nombre);
+  if (!nombre) throw new Error('Escribe tu nombre');
+  if (nombre.length > 40) throw new Error('El nombre es demasiado largo');
+  return conBloqueo_(function (ss, yo) {
+    if (!yo.blocked) return; // ya tiene acceso
+    var h = ss.getSheetByName('Solicitudes');
+    var filas = filas_(ss, 'Solicitudes');
+    for (var i = 0; i < filas.length; i++) {
+      if (correo_(filas[i][0]) === yo.email) { h.getRange(i + 2, 2, 1, 2).setValues([[nombre, new Date()]]); return; }
+    }
+    var pendientes = filas.filter(function (r) { return correo_(r[0]); }).length;
+    if (pendientes >= MAX_SOLICITUDES) throw new Error('Hay demasiadas solicitudes pendientes. Avisa a alguien del equipo.');
+    h.getRange(ultimaFilaConNombre_(h) + 1, 1, 1, 3).setValues([[yo.email, nombre, new Date()]]);
+  }, { sinAlta: true, bloqueado: true });
+}
+
+/** Da acceso a un correo. Una solicitud la puede aceptar cualquiera del equipo; dar acceso sin solicitud, solo el dueño. */
+function aprobarAcceso(correo) {
+  correo = correo_(correo);
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(correo) && !/^@[^@\s]+\.[^@\s]+$/.test(correo)) throw new Error('Escribe un correo válido');
+  return conBloqueo_(function (ss, yo) {
+    var filas = filas_(ss, 'Solicitudes'), nombre = '', pedida = false;
+    filas.forEach(function (r) { if (correo_(r[0]) === correo) { pedida = true; nombre = texto_(r[1]); } });
+    if (!pedida && !yo.owner) throw new Error('Solo el dueño puede dar acceso a alguien que no lo ha pedido.');
+    if (correo === '@gmail.com' || correo === '@googlemail.com') throw new Error('Eso daría acceso a cualquier persona con Gmail. Añade los correos uno a uno.');
+    var p = ss.getSheetByName('Permitidos');
+    var lista = filas_(ss, 'Permitidos').map(function (r) { return correo_(r[0]); });
+    if (lista.indexOf(correo) < 0) p.getRange(ultimaFilaConNombre_(p) + 1, 1).setValue(correo);
+    if (pedida) borrarFilasCorreo_(ss.getSheetByName('Solicitudes'), correo);
+    if (nombre && correo.charAt(0) !== '@') altaConNombre_(ss, correo, nombre);
+  });
+}
+
+/** Descarta una solicitud. Puede hacerlo cualquiera del equipo. */
+function rechazarAcceso(correo) {
+  correo = correo_(correo);
+  return conBloqueo_(function (ss) { borrarFilasCorreo_(ss.getSheetByName('Solicitudes'), correo); });
+}
+
+/** Quita el acceso a un correo o dominio. Solo el dueño. */
+function quitarAcceso(entrada) {
+  entrada = correo_(entrada);
+  return conBloqueo_(function (ss, yo) {
+    if (!yo.owner) throw new Error('Solo el dueño puede quitar el acceso.');
+    if (esDueno_(entrada)) throw new Error('El dueño siempre tiene acceso.');
+    borrarFilasCorreo_(ss.getSheetByName('Permitidos'), entrada);
+  });
+}
+
 /* ---------- Versión GitHub: la web llama aquí con fetch ---------- */
 
 /** Recibe {action, args, token} y responde {ok, data} o {ok:false, error, code}. */
@@ -282,16 +305,31 @@ function doPost(e) {
   var acciones = {
     cargarDatos: cargarDatos, registrarme: registrarme, cambiarMiNombre: cambiarMiNombre,
     guardarRonda: guardarRonda, borrarRonda: borrarRonda, guardarPago: guardarPago, borrarPago: borrarPago,
-    guardarPersonas: guardarPersonas, guardarProductos: guardarProductos
+    guardarPersonas: guardarPersonas, guardarProductos: guardarProductos,
+    solicitarAcceso: solicitarAcceso, aprobarAcceso: aprobarAcceso, rechazarAcceso: rechazarAcceso, quitarAcceso: quitarAcceso
   };
   var salida;
   try {
     var peticion = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    var fn = acciones[peticion.action];
-    if (!fn) throw new Error('Acción desconocida');
     MODO_API_ = true;
-    CORREO_API_ = verificarToken_(peticion.token);
-    salida = { ok: true, data: fn.apply(null, Array.isArray(peticion.args) ? peticion.args : []) };
+    if (peticion.action === 'iniciarSesion') {
+      // Entrar: se comprueba el token de Google una vez y se da una sesión propia de la app.
+      CORREO_API_ = verificarToken_(peticion.token);
+      salida = { ok: true, data: cargarDatos(), session: crearSesion_(CORREO_API_) };
+    } else {
+      var fn = acciones[peticion.action];
+      if (!fn) throw new Error('Acción desconocida');
+      var renovar = false;
+      if (peticion.session) {
+        var ses = leerSesion_(peticion.session);
+        CORREO_API_ = correo_(ses.e);
+        renovar = (Date.now() / 1000 - ses.i) > 86400; // como mucho una vez al día
+      } else {
+        CORREO_API_ = verificarToken_(peticion.token); // webs aún sin actualizar
+      }
+      salida = { ok: true, data: fn.apply(null, Array.isArray(peticion.args) ? peticion.args : []) };
+      if (renovar) salida.session = crearSesion_(CORREO_API_);
+    }
   } catch (err) {
     salida = { ok: false, error: String((err && err.message) || err), code: (err && err.code) || '' };
   }
@@ -319,12 +357,78 @@ function verificarToken_(token) {
   return correo;
 }
 
+/* Sesión de la app: «v1.<datos>.<firma>», firmada con un secreto que solo conoce este servidor.
+   Quién tiene acceso se sigue comprobando en cada petición (pestaña Permitidos). */
+function crearSesion_(correo) {
+  var ahora = Math.floor(Date.now() / 1000);
+  var datos = sinRelleno_(Utilities.base64EncodeWebSafe(JSON.stringify({ e: correo, i: ahora, x: ahora + DIAS_SESION * 86400 })));
+  return 'v1.' + datos + '.' + firma_('v1.' + datos);
+}
+
+function leerSesion_(sesion) {
+  var partes = String(sesion || '').split('.');
+  if (partes.length !== 3 || partes[0] !== 'v1' || firma_('v1.' + partes[1]) !== partes[2]) {
+    throw conCodigo_('Vuelve a entrar con tu cuenta de Google.', 'login');
+  }
+  var datos = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(conRelleno_(partes[1]))).getDataAsString());
+  if (!datos.e || !(Number(datos.x) > Date.now() / 1000)) throw conCodigo_('Tu sesión ha caducado. Vuelve a entrar.', 'login');
+  return datos;
+}
+
+function firma_(texto) {
+  return sinRelleno_(Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(texto, secretoSesion_())));
+}
+
+/** Para cerrar todas las sesiones abiertas a la vez, borra SECRETO_SESION en Propiedades del script. */
+function secretoSesion_() {
+  var props = PropertiesService.getScriptProperties();
+  var secreto = props.getProperty('SECRETO_SESION');
+  if (!secreto) {
+    secreto = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty('SECRETO_SESION', secreto);
+  }
+  return secreto;
+}
+
+function sinRelleno_(b) { return String(b).replace(/=+$/, ''); }
+function conRelleno_(b) { b = String(b); while (b.length % 4) b += '='; return b; }
+
 function conCodigo_(mensaje, codigo) { var e = new Error(mensaje); e.code = codigo; return e; }
 
 /* ---------- Ayudantes privados (acaban en _ y no se pueden llamar desde la web) ---------- */
 
 function correoActual_() {
   return MODO_API_ ? correo_(CORREO_API_) : correo_(Session.getActiveUser().getEmail());
+}
+
+function esDueno_(email) {
+  var dueno = PropertiesService.getScriptProperties().getProperty('DUENO');
+  return !!(email && dueno && correo_(email) === correo_(dueno));
+}
+
+/** Da de alta a quien acaba de recibir acceso, con el nombre que pidió, si está libre o es de alguien sin cuenta. */
+function altaConNombre_(ss, correo, nombre) {
+  var h = ss.getSheetByName('Personas');
+  var filas = filas_(ss, 'Personas');
+  for (var i = 0; i < filas.length; i++) if (correo_(filas[i][1]) === correo) return;
+  for (var j = 0; j < filas.length; j++) {
+    if (igual_(filas[j][0], nombre)) {
+      if (correo_(filas[j][1])) return; // ese nombre es de otra cuenta: lo elegirá al entrar
+      h.getRange(j + 2, 2, 1, 2).setValues([[correo, true]]);
+      return;
+    }
+  }
+  var fila = ultimaFilaConNombre_(h) + 1;
+  h.getRange(fila, 3).insertCheckboxes();
+  h.getRange(fila, 1, 1, 3).setValues([[nombre, correo, true]]);
+}
+
+/** Borra las filas cuya columna A es ese correo (sin distinguir mayúsculas). */
+function borrarFilasCorreo_(h, correo) {
+  var n = h.getLastRow() - 1;
+  if (n < 1 || !correo) return;
+  var col = h.getRange(2, 1, n, 1).getValues();
+  for (var i = col.length - 1; i >= 0; i--) if (correo_(col[i][0]) === correo) h.deleteRow(i + 2);
 }
 
 /** El dueño siempre entra. Si la pestaña Permitidos tiene filas, solo entran esos correos o dominios. */
@@ -348,7 +452,7 @@ function usuario_(ss, filasPersonas) {
       return false;
     });
   }
-  return { email: email, name: name };
+  return { email: email, name: name, owner: esDueno_(email) };
 }
 
 function libro_() {
@@ -378,8 +482,8 @@ function asegurar_(ss) {
       h.getRange('B:B').setNumberFormat(FORMATO_EUR);
       h.getRange(2, 1, PRODUCTOS_INICIALES.length, 2).setValues(PRODUCTOS_INICIALES);
     } else if (nombre === 'Permitidos') {
-      h.getRange('C1').setValue('Un correo por fila (ana@gmail.com) o un dominio entero (@tuempresa.com). ' +
-        'Vacía: en la versión de Apps Script entra quien tenga acceso a la hoja; en la de GitHub, solo el dueño.');
+      h.getRange('C1').setValue('Correos con acceso. Se rellena sola al aceptar solicitudes en la app; también puedes escribir ' +
+        'un correo por fila o un dominio entero (@tuempresa.com). Vacía: en la versión de Apps Script entra quien tenga acceso a la hoja; en la de GitHub, solo el dueño.');
       h.getRange('C1').setFontColor('#666666');
     }
   });
@@ -436,7 +540,7 @@ function conBloqueo_(fn, opciones) {
     asegurar_(ss);
     var yo = usuario_(ss);
     if (!yo.email) throw new Error(SIN_CORREO);
-    if (yo.blocked) throw new Error(SIN_PERMISO);
+    if (yo.blocked && !(opciones && opciones.bloqueado)) throw new Error(SIN_PERMISO);
     if (!yo.name && !(opciones && opciones.sinAlta)) throw new Error(SIN_ALTA);
     var id = fn(ss, yo);
     SpreadsheetApp.flush();
